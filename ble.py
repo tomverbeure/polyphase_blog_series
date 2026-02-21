@@ -162,7 +162,7 @@ if False:
 
 n                       = np.arange(len(ble_input), dtype=np.float32)
 heterodyne_1mhz         = np.exp(1j * 2.0 * np.pi * 1e6 * n / sample_rate_hz).astype(np.complex64)
-ble_input_1mhz_shift    = ble_input * heterodyne_1mhz
+ble_input_1mhz          = ble_input * heterodyne_1mhz
 
 h_lpf = create_remez_lowpass_fir(
     input_sample_rate_hz     = sample_rate_hz,
@@ -176,7 +176,7 @@ print("h_lpf nr taps:", len(h_lpf))
 
 # There are 40 channels that are 2 MHz wide, but instead of a 80 MHz sample rate, we have
 # 96. So the decimation factor is 48 instead of 40.
-decim_factor    = int(lp_input_sample_rate_hz // 2e6)
+decim_factor    = int(sample_rate_hz // 2e6)
 
 # Pad the filter with zeros so that the polyphase decomposition 
 # is a clean 2D array.
@@ -199,50 +199,137 @@ print("H_lpf padded nr taps:", len(h_lpf))
 h_lpf_poly  = np.reshape(h_lpf, ( (len(h_lpf) // decim_factor), decim_factor) ).T
 
 # Now do the same polyphase decomposition/decimation of the input signal
-ble_input_1mhz_shift = np.pad(ble_input_1mhz_shift, (0, -len(ble_input_1mhz_shift) % decim_factor) )
-ble_decim   = np.flipud(
+ble_input_1mhz  = np.pad(ble_input_1mhz, (0, -len(ble_input_1mhz) % decim_factor) )
+ble_decim_1mhz  = np.flipud(
     np.reshape(
-        ble_input_1mhz_shift,
-        ((len(ble_input_1mhz_shift) // decim_factor), decim_factor),
+        ble_input_1mhz,
+        ((len(ble_input_1mhz) // decim_factor), decim_factor),
     ).T
 )
 
 # Calculate the output of all polyphase filters
-h_poly_out  = np.array([np.convolve(ble_decim[_], h_lpf_poly[_]) for _ in range(decim_factor)])
+h_poly_out_1mhz = np.array([np.convolve(ble_decim_1mhz[_], h_lpf_poly[_]) for _ in range(decim_factor)])
 
 # Use the IFFT to calculate the output of all channels
 # The command below is the vectorized version of this:
 # for col_idx in range(num_columns):
 #     channel_data[:, col_idx] = np.fft.ifft(h_poly_out[:, col_idx])
-channel_data  = np.fft.ifft(h_poly_out, axis=0).astype(np.complex64)
+channel_data_1mhz   = np.fft.ifft(h_poly_out_1mhz, axis=0).astype(np.complex64)
 
-channel_sample_rate_hz   = sample_rate_hz / decim_factor
-channel_time_ms          = np.arange(channel_data.shape[1]) / channel_sample_rate_hz * 1e3
+if False:
+    channel_sample_rate_hz   = sample_rate_hz / decim_factor
+    channel_time_ms          = np.arange(channel_data_1mhz.shape[1]) / channel_sample_rate_hz * 1e3
+    
+    chan_41_time_mask        = (channel_time_ms >= 2.4) & (channel_time_ms <= 2.8)
+    chan_41_time_ms          = channel_time_ms[chan_41_time_mask]
+    chan_41                  = channel_data_1mhz[41, chan_41_time_mask]
+    chan_41_fm               = demod_fm(chan_41, factor = 1)
+    
+    chan_33_time_mask        = (channel_time_ms >= 1.13) & (channel_time_ms <= 1.23)
+    chan_33_time_ms          = channel_time_ms[chan_33_time_mask]
+    chan_33                  = channel_data_1mhz[33, chan_33_time_mask]
+    chan_33_fm               = demod_fm(chan_33, factor = 1)
+    
+    fig, axs = plt.subplots(2, 1, figsize=(12, 6), constrained_layout=True, sharex=True)
+    axs[0].plot(chan_33_time_ms, chan_33.real, label="I")
+    axs[0].plot(chan_33_time_ms, chan_33.imag, label="Q")
+    axs[0].plot(chan_33_time_ms, np.abs(chan_33), label="|IQ|", linewidth=1.2)
+    axs[0].set_title("Channel 33 Time Plot (2.4 ms to 2.8 ms)")
+    axs[0].set_ylabel("Amplitude")
+    axs[0].grid(True, alpha=0.3)
+    axs[0].legend()
+    axs[0].margins(x=0.0)
+    axs[1].plot(chan_33_time_ms[1:], chan_33_fm, color="tab:green", label="FM Decoded")
+    axs[1].set_xlabel("Time (ms)")
+    axs[1].set_ylabel("FM")
+    axs[1].grid(True, alpha=0.3)
+    axs[1].legend()
+    axs[1].margins(x=0.0)
+    fig.savefig("chan_33_time_plot.png", dpi=150)
+    plt.show()
 
-chan_41_time_mask        = (channel_time_ms >= 2.4) & (channel_time_ms <= 2.8)
-chan_41_time_ms          = channel_time_ms[chan_41_time_mask]
-chan_41                  = channel_data[41, chan_41_time_mask]
-chan_41_fm               = demod_fm(chan_41, factor = 1)
+# Let's do this again, but instead of doing the 1 MHz heterodyne at the start,
+# we do it after the IFFT. The filter stays the same, but we need to
+# decimate again.
 
-chan_33_time_mask        = (channel_time_ms >= 1.13) & (channel_time_ms <= 1.23)
-chan_33_time_ms          = channel_time_ms[chan_33_time_mask]
-chan_33                  = channel_data[33, chan_33_time_mask]
-chan_33_fm               = demod_fm(chan_33, factor = 1)
+ble_input   = np.pad(ble_input, (0, -len(ble_input) % decim_factor) )
+ble_decim   = np.flipud(
+    np.reshape(
+        ble_input,
+        ((len(ble_input) // decim_factor), decim_factor),
+    ).T
+)
+h_poly_out              = np.array([np.convolve(ble_decim[_], h_lpf_poly[_]) for _ in range(decim_factor)])
+channel_data            = np.fft.ifft(h_poly_out, axis=0).astype(np.complex64)
 
-fig, axs = plt.subplots(2, 1, figsize=(12, 6), constrained_layout=True, sharex=True)
-axs[0].plot(chan_33_time_ms, chan_33.real, label="I")
-axs[0].plot(chan_33_time_ms, chan_33.imag, label="Q")
-axs[0].plot(chan_33_time_ms, np.abs(chan_33), label="|IQ|", linewidth=1.2)
-axs[0].set_title("Channel 33 Time Plot (2.4 ms to 2.8 ms)")
-axs[0].set_ylabel("Amplitude")
-axs[0].grid(True, alpha=0.3)
-axs[0].legend()
-axs[0].margins(x=0.0)
-axs[1].plot(chan_33_time_ms[1:], chan_33_fm, color="tab:green", label="FM Decoded")
-axs[1].set_xlabel("Time (ms)")
-axs[1].set_ylabel("FM")
-axs[1].grid(True, alpha=0.3)
-axs[1].legend()
-axs[1].margins(x=0.0)
-fig.savefig("chan_33_time_plot.png", dpi=150)
-plt.show()
+n_decim                 = np.arange(channel_data.shape[1], dtype=np.float32)
+heterodyne_1mhz_decim   = np.exp(1j * 2.0 * np.pi * 1e6 * n_decim / (sample_rate_hz / decim_factor)).astype(np.complex64)
+
+# [None, :] converts a 1D vector into a 2D vector of size 1xN. If you then do a matrix
+# multiply, you multiply this vector with each of the channel_data rows. 
+# IOW, you heterodyne all channels in parallel.
+channel_data_1mhz_post  = channel_data * heterodyne_1mhz_decim[None, :]
+
+if True:
+    channel_sample_rate_hz   = sample_rate_hz / decim_factor
+    channel_time_ms          = np.arange(channel_data.shape[1]) / channel_sample_rate_hz * 1e3
+    
+    chan_41_time_mask        = (channel_time_ms >= 2.4) & (channel_time_ms <= 2.8)
+    chan_41_time_ms          = channel_time_ms[chan_41_time_mask]
+    chan_41                  = channel_data[41, chan_41_time_mask]
+    chan_41_fm               = demod_fm(chan_41, factor = 1)
+    
+    chan_33_time_mask        = (channel_time_ms >= 1.13) & (channel_time_ms <= 1.23)
+    chan_33_time_ms          = channel_time_ms[chan_33_time_mask]
+    chan_33                  = channel_data[33, chan_33_time_mask]
+    chan_33_fm               = demod_fm(chan_33, factor = 1)
+    
+    fig, axs = plt.subplots(2, 1, figsize=(12, 6), constrained_layout=True, sharex=True)
+    axs[0].plot(chan_33_time_ms, chan_33.real, label="I")
+    axs[0].plot(chan_33_time_ms, chan_33.imag, label="Q")
+    axs[0].plot(chan_33_time_ms, np.abs(chan_33), label="|IQ|", linewidth=1.2)
+    axs[0].set_title("Channel 33 Time Plot (2.4 ms to 2.8 ms)")
+    axs[0].set_ylabel("Amplitude")
+    axs[0].grid(True, alpha=0.3)
+    axs[0].legend()
+    axs[0].margins(x=0.0)
+    axs[1].plot(chan_33_time_ms[1:], chan_33_fm, color="tab:green", label="FM Decoded")
+    axs[1].set_xlabel("Time (ms)")
+    axs[1].set_ylabel("FM")
+    axs[1].grid(True, alpha=0.3)
+    axs[1].legend()
+    axs[1].margins(x=0.0)
+    fig.savefig("chan_33_time_plot.png", dpi=150)
+    plt.show()
+
+if True:
+    channel_sample_rate_hz   = sample_rate_hz / decim_factor
+    channel_time_ms          = np.arange(channel_data_1mhz_post.shape[1]) / channel_sample_rate_hz * 1e3
+    
+    chan_41_time_mask        = (channel_time_ms >= 2.4) & (channel_time_ms <= 2.8)
+    chan_41_time_ms          = channel_time_ms[chan_41_time_mask]
+    chan_41                  = channel_data_1mhz_post[41, chan_41_time_mask]
+    chan_41_fm               = demod_fm(chan_41, factor = 1)
+    
+    chan_33_time_mask        = (channel_time_ms >= 1.13) & (channel_time_ms <= 1.23)
+    chan_33_time_ms          = channel_time_ms[chan_33_time_mask]
+    chan_33                  = channel_data_1mhz_post[33, chan_33_time_mask]
+    chan_33_fm               = demod_fm(chan_33, factor = 1)
+    
+    fig, axs = plt.subplots(2, 1, figsize=(12, 6), constrained_layout=True, sharex=True)
+    axs[0].plot(chan_33_time_ms, chan_33.real, label="I")
+    axs[0].plot(chan_33_time_ms, chan_33.imag, label="Q")
+    axs[0].plot(chan_33_time_ms, np.abs(chan_33), label="|IQ|", linewidth=1.2)
+    axs[0].set_title("Channel 33 Time Plot (2.4 ms to 2.8 ms)")
+    axs[0].set_ylabel("Amplitude")
+    axs[0].grid(True, alpha=0.3)
+    axs[0].legend()
+    axs[0].margins(x=0.0)
+    axs[1].plot(chan_33_time_ms[1:], chan_33_fm, color="tab:green", label="FM Decoded")
+    axs[1].set_xlabel("Time (ms)")
+    axs[1].set_ylabel("FM")
+    axs[1].grid(True, alpha=0.3)
+    axs[1].legend()
+    axs[1].margins(x=0.0)
+    fig.savefig("chan_33_time_plot.png", dpi=150)
+    plt.show()

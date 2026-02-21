@@ -67,8 +67,6 @@ signal_multi_info = SigInfo(
     sample_rate        = sample_clock_hz,
     frequencies_hz     = [signal1_freq_hz, signal2_freq_hz, signal3_freq_hz, signal4_freq_hz],
     amplitudes_db      = [SIGNAL1_AMPL_DB, SIGNAL2_AMPL_DB, SIGNAL3_AMPL_DB, SIGNAL4_AMPL_DB],
-    #frequencies_hz     = [signal1_freq_hz, signal2_freq_hz, ],
-    #amplitudes_db      = [SIGNAL1_AMPL_DB, SIGNAL2_AMPL_DB, ],
     stopband_center_hz = 25e6,
     stopband_width_hz  = 20e6,
     noise_floor_db     = FLOOR_NOISE_AMPL_DB,
@@ -103,7 +101,9 @@ signal_bpf_decim_complex = signal_bpf_complex[::DECIM_FACTOR]
 
 sample_clock_decim_hz = sample_clock_hz / DECIM_FACTOR
 
+#------------------------------------------------------------
 # polyphase channelizer
+#------------------------------------------------------------
 
 # Convert h_lpf into its polyphase decomposition.
 h_poly              = np.zeros((DECIM_FACTOR, int(np.ceil(LPF_FIR_TAPS / DECIM_FACTOR))))
@@ -132,9 +132,10 @@ for m in range(len(h_poly_out[0])):
     signal_poly_out[:, m] = ifft_out
 
 #============================================================
-# Plot: input spectrum + BPF
+# Plot: input spectrum + real BPF
 #============================================================
 
+# I didn't include the real version of the BPF in the blog...
 if False:
     window = np.kaiser(NR_SAMPLES, 14.0)
     coherent_gain_real = np.sum(window) / 2.0
@@ -219,19 +220,11 @@ if False:
     fig_bpf_decim.savefig("polyphase_het_sim-signal_bfp_filtered_decim_real.png", format="png", dpi=200)
     plt.show()
 
-window = np.kaiser(NR_SAMPLES, 14.0)
-coherent_gain_real = np.sum(window) / 2.0
-fft_vals = np.fft.fftshift(np.fft.fft(signal * window))
-freqs_hz = np.fft.fftshift(np.fft.fftfreq(NR_SAMPLES, d=1.0 / sample_clock_hz))
-mag = np.abs(fft_vals) / coherent_gain_real
-mag_db = 20 * np.log10(np.maximum(mag, 1e-12))
-mag_db -= np.max(mag_db)
-
 #============================================================
 # Plot: input spectrum + complex BPF
 #============================================================
 
-if False:
+if True:
     bpf_c_fft_vals = np.fft.fftshift(np.fft.fft(h_bpf_complex, n=NR_SAMPLES))
     bpf_c_mag = np.abs(bpf_c_fft_vals)
     bpf_c_mag_db = 20 * np.log10(np.maximum(bpf_c_mag, 1e-12))
@@ -273,7 +266,9 @@ if False:
 # Plot: decimated complex bandpass filtered signal spectrum
 #============================================================
 
-if False:
+# This code does straight decimation instead of first heterodyning
+# back to 0... because the result is the same.
+if True:
     window_bpf_decim_c = np.kaiser(len(signal_bpf_decim_complex), 14.0)
     coherent_gain_bpf_decim_c = np.sum(window_bpf_decim_c)
     fft_bpf_decim_c_vals = np.fft.fftshift(np.fft.fft(signal_bpf_decim_complex * window_bpf_decim_c))

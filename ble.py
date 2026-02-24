@@ -4,6 +4,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy import signal
 
+plot_waterfall          = True
+plot_het_pre_1mhz       = True
+plot_het_post_1mhz      = True
+
 # BLE specification: 
 # https://www.bluetooth.com/wp-content/uploads/Files/Specification/HTML/Core-62/out/en/low-energy-controller/radio-physical-layer-specification.html
 
@@ -101,6 +105,18 @@ def create_remez_lowpass_fir(
 
     return fir_taps
 
+# BLE occupies a spectrum from 2400 MHz to 2483.5 MHz.
+# There are 40 channels that are each 2 MHz wide. 
+# The center frequency is 2402 + k * 2 MHz.
+
+sample_rate_hz      = 96e6
+center_freq_hz      = 2441e6
+channel_width_hz    = 2e6
+channel_offset_hz   = 1e6
+
+# There are 40 channels that are 2 MHz wide, but instead of a 80 MHz sample rate, we have
+# 96. So the decimation factor is 48 instead of 40.
+decim_factor    = int(sample_rate_hz // channel_width_hz)
 
 # Input data contains 8-bit I/Q values, with I and Q interleaved.
 # The data is sampled at 96 Msps with a center frequency of 2441 MHz.
@@ -108,22 +124,18 @@ with open("ble/advertising-sequence.cs8", "rb") as f:
     ble_input  = np.fromfile(f, dtype=np.int8)
 
 # Reduce to [-1:1] range
-ble_input  = ble_input.astype(np.complex64) / 128.0
+ble_input   = ble_input.astype(np.complex64) / 128.0
 
 # Merge alternating real/imaginary values into 1 complex value
-ble_input  = ble_input[::2] #+ ble_input[1::2] * 1j 
+ble_input   = ble_input[::2] #+ ble_input[1::2] * 1j 
+
+# Truncate so that ble_input is a multiple of decim_factor. This way,
+# the number of samples per phase is the same for all phases.
+ble_input   = ble_input[ : (len(ble_input)//decim_factor) * decim_factor]
 
 print(len(ble_input))
 
-# BLE occupies a spectrum from 2400 MHz to 2483.5 MHz.
-# There are 40 channels that are each 2 MHz wide. 
-# The center frequency is 2402 + k * 2 MHz.
-
-# Build a spectrogram waterfall diagram.
-sample_rate_hz  = 96e6
-center_freq_hz  = 2441e6
-
-if False:
+if plot_waterfall:
     nfft            = 1024
     overlap         = 256
     
@@ -161,8 +173,8 @@ if False:
 # to make all center channels a multiple of 2, without offset.
 
 n                       = np.arange(len(ble_input), dtype=np.float32)
-heterodyne_1mhz         = np.exp(1j * 2.0 * np.pi * 1e6 * n / sample_rate_hz).astype(np.complex64)
-ble_input_1mhz          = ble_input * heterodyne_1mhz
+heterodyne_1mhz         = np.exp(1j * 2.0 * np.pi * channel_offset_hz / sample_rate_hz * n).astype(np.complex64)
+ble_input_pre_1mhz      = ble_input * heterodyne_1mhz
 
 h_lpf = create_remez_lowpass_fir(
     input_sample_rate_hz     = sample_rate_hz,
@@ -174,14 +186,10 @@ h_lpf = create_remez_lowpass_fir(
 
 print("h_lpf nr taps:", len(h_lpf))
 
-# There are 40 channels that are 2 MHz wide, but instead of a 80 MHz sample rate, we have
-# 96. So the decimation factor is 48 instead of 40.
-decim_factor    = int(sample_rate_hz // 2e6)
-
 # Pad the filter with zeros so that the polyphase decomposition 
 # is a clean 2D array.
 #
-# -1 % 10 = 9 so using the module of a negative number is a neat way
+# -1 % 10 = 9 so using the modulo of a negative number is a neat way
 # to calculate the amount of padding.
 h_lpf       = np.pad(h_lpf, (0, -len(h_lpf) % decim_factor) )
 print("H_lpf padded nr taps:", len(h_lpf))
@@ -199,42 +207,42 @@ print("H_lpf padded nr taps:", len(h_lpf))
 h_lpf_poly  = np.reshape(h_lpf, ( (len(h_lpf) // decim_factor), decim_factor) ).T
 
 # Now do the same polyphase decomposition/decimation of the input signal
-ble_input_1mhz  = np.pad(ble_input_1mhz, (0, -len(ble_input_1mhz) % decim_factor) )
-ble_decim_1mhz  = np.flipud(
+# The higher the phase, the earlier the sample, so use flipud to invert the rows.
+ble_decim_pre_1mhz  = np.flipud(
     np.reshape(
-        ble_input_1mhz,
-        ((len(ble_input_1mhz) // decim_factor), decim_factor),
+        ble_input_pre_1mhz,
+        ((len(ble_input_pre_1mhz) // decim_factor), decim_factor),
     ).T
 )
 
 # Calculate the output of all polyphase filters
-h_poly_out_1mhz = np.array([np.convolve(ble_decim_1mhz[_], h_lpf_poly[_]) for _ in range(decim_factor)])
+h_poly_out_pre_1mhz = np.array([np.convolve(ble_decim_pre_1mhz[_], h_lpf_poly[_]) for _ in range(decim_factor)])
 
 # Use the IFFT to calculate the output of all channels
 # The command below is the vectorized version of this:
 # for col_idx in range(num_columns):
 #     channel_data[:, col_idx] = np.fft.ifft(h_poly_out[:, col_idx])
-channel_data_1mhz   = np.fft.ifft(h_poly_out_1mhz, axis=0).astype(np.complex64)
+channel_data_pre_1mhz   = np.fft.ifft(h_poly_out_pre_1mhz, axis=0).astype(np.complex64)
 
-if False:
+if plot_het_pre_1mhz:
     channel_sample_rate_hz   = sample_rate_hz / decim_factor
-    channel_time_ms          = np.arange(channel_data_1mhz.shape[1]) / channel_sample_rate_hz * 1e3
+    channel_time_ms          = np.arange(channel_data_pre_1mhz.shape[1]) / channel_sample_rate_hz * 1e3
     
     chan_41_time_mask        = (channel_time_ms >= 2.4) & (channel_time_ms <= 2.8)
     chan_41_time_ms          = channel_time_ms[chan_41_time_mask]
-    chan_41                  = channel_data_1mhz[41, chan_41_time_mask]
+    chan_41                  = channel_data_pre_1mhz[41, chan_41_time_mask]
     chan_41_fm               = demod_fm(chan_41, factor = 1)
     
     chan_33_time_mask        = (channel_time_ms >= 1.13) & (channel_time_ms <= 1.23)
     chan_33_time_ms          = channel_time_ms[chan_33_time_mask]
-    chan_33                  = channel_data_1mhz[33, chan_33_time_mask]
+    chan_33                  = channel_data_pre_1mhz[33, chan_33_time_mask]
     chan_33_fm               = demod_fm(chan_33, factor = 1)
     
     fig, axs = plt.subplots(2, 1, figsize=(12, 6), constrained_layout=True, sharex=True)
     axs[0].plot(chan_33_time_ms, chan_33.real, label="I")
     axs[0].plot(chan_33_time_ms, chan_33.imag, label="Q")
     axs[0].plot(chan_33_time_ms, np.abs(chan_33), label="|IQ|", linewidth=1.2)
-    axs[0].set_title("Channel 33 Time Plot (2.4 ms to 2.8 ms)")
+    axs[0].set_title("Het Pre - Channel 33 Time Plot (2.4 ms to 2.8 ms)")
     axs[0].set_ylabel("Amplitude")
     axs[0].grid(True, alpha=0.3)
     axs[0].legend()
@@ -245,64 +253,45 @@ if False:
     axs[1].grid(True, alpha=0.3)
     axs[1].legend()
     axs[1].margins(x=0.0)
-    fig.savefig("chan_33_time_plot.png", dpi=150)
+    fig.savefig("chan_33_time_plot_het_pre.png", dpi=150)
+    fig.savefig("chan_33_time_plot_het_pre.svg", dpi=150)
     plt.show()
 
 # Let's do this again, but instead of doing the 1 MHz heterodyne at the start,
 # we do it after the IFFT. The filter stays the same, but we need to
 # decimate again.
 
-ble_input   = np.pad(ble_input, (0, -len(ble_input) % decim_factor) )
 ble_decim   = np.flipud(
     np.reshape(
         ble_input,
         ((len(ble_input) // decim_factor), decim_factor),
     ).T
 )
-h_poly_out              = np.array([np.convolve(ble_decim[_], h_lpf_poly[_]) for _ in range(decim_factor)])
-channel_data            = np.fft.ifft(h_poly_out, axis=0).astype(np.complex64)
 
-n_decim                 = np.arange(channel_data.shape[1], dtype=np.float32)
-heterodyne_1mhz_decim   = np.exp(1j * 2.0 * np.pi * 1e6 * n_decim / (sample_rate_hz / decim_factor)).astype(np.complex64)
+frac_offset             = channel_offset_hz / (sample_rate_hz / decim_factor)
+omega_delta             = 2 * np.pi * frac_offset / decim_factor
+
+h_n                     = np.arange(len(h_lpf_poly[0]), dtype=np.float32)
+h_lpf_poly_adj          = np.exp(-1j * omega_delta * decim_factor * h_n).astype(np.complex64)
+h_lpf_poly_het          = h_lpf_poly * h_lpf_poly_adj
+
+h_poly_out              = np.array([np.convolve(ble_decim[_], h_lpf_poly_het[_]) for _ in range(decim_factor)])
+
+phase_nr                = np.arange(decim_factor, dtype=np.float32)
+h_phase_adj             = np.exp(-1j * omega_delta * phase_nr).astype(np.complex64)
+h_poly_out_phase_adj    = h_poly_out * h_phase_adj[:, None]
+
+channel_data            = np.fft.ifft(h_poly_out_phase_adj, axis=0).astype(np.complex64)
+
+sample_nr               = np.arange(channel_data.shape[1], dtype=np.float32)
+heterodyne_1mhz_decim   = np.exp(1j * omega_delta * decim_factor * sample_nr).astype(np.complex64)
 
 # [None, :] converts a 1D vector into a 2D vector of size 1xN. If you then do a matrix
 # multiply, you multiply this vector with each of the channel_data rows. 
 # IOW, you heterodyne all channels in parallel.
 channel_data_1mhz_post  = channel_data * heterodyne_1mhz_decim[None, :]
 
-if True:
-    channel_sample_rate_hz   = sample_rate_hz / decim_factor
-    channel_time_ms          = np.arange(channel_data.shape[1]) / channel_sample_rate_hz * 1e3
-    
-    chan_41_time_mask        = (channel_time_ms >= 2.4) & (channel_time_ms <= 2.8)
-    chan_41_time_ms          = channel_time_ms[chan_41_time_mask]
-    chan_41                  = channel_data[41, chan_41_time_mask]
-    chan_41_fm               = demod_fm(chan_41, factor = 1)
-    
-    chan_33_time_mask        = (channel_time_ms >= 1.13) & (channel_time_ms <= 1.23)
-    chan_33_time_ms          = channel_time_ms[chan_33_time_mask]
-    chan_33                  = channel_data[33, chan_33_time_mask]
-    chan_33_fm               = demod_fm(chan_33, factor = 1)
-    
-    fig, axs = plt.subplots(2, 1, figsize=(12, 6), constrained_layout=True, sharex=True)
-    axs[0].plot(chan_33_time_ms, chan_33.real, label="I")
-    axs[0].plot(chan_33_time_ms, chan_33.imag, label="Q")
-    axs[0].plot(chan_33_time_ms, np.abs(chan_33), label="|IQ|", linewidth=1.2)
-    axs[0].set_title("Channel 33 Time Plot (2.4 ms to 2.8 ms)")
-    axs[0].set_ylabel("Amplitude")
-    axs[0].grid(True, alpha=0.3)
-    axs[0].legend()
-    axs[0].margins(x=0.0)
-    axs[1].plot(chan_33_time_ms[1:], chan_33_fm, color="tab:green", label="FM Decoded")
-    axs[1].set_xlabel("Time (ms)")
-    axs[1].set_ylabel("FM")
-    axs[1].grid(True, alpha=0.3)
-    axs[1].legend()
-    axs[1].margins(x=0.0)
-    fig.savefig("chan_33_time_plot.png", dpi=150)
-    plt.show()
-
-if True:
+if plot_het_post_1mhz:
     channel_sample_rate_hz   = sample_rate_hz / decim_factor
     channel_time_ms          = np.arange(channel_data_1mhz_post.shape[1]) / channel_sample_rate_hz * 1e3
     
@@ -320,7 +309,7 @@ if True:
     axs[0].plot(chan_33_time_ms, chan_33.real, label="I")
     axs[0].plot(chan_33_time_ms, chan_33.imag, label="Q")
     axs[0].plot(chan_33_time_ms, np.abs(chan_33), label="|IQ|", linewidth=1.2)
-    axs[0].set_title("Channel 33 Time Plot (2.4 ms to 2.8 ms)")
+    axs[0].set_title("Het Post - Channel 33 Time Plot (2.4 ms to 2.8 ms)")
     axs[0].set_ylabel("Amplitude")
     axs[0].grid(True, alpha=0.3)
     axs[0].legend()
@@ -331,5 +320,6 @@ if True:
     axs[1].grid(True, alpha=0.3)
     axs[1].legend()
     axs[1].margins(x=0.0)
-    fig.savefig("chan_33_time_plot.png", dpi=150)
+    fig.savefig("chan_33_time_plot_het_post.png", dpi=150)
+    fig.savefig("chan_33_time_plot_het_post.svg", dpi=150)
     plt.show()
